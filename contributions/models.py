@@ -5,7 +5,7 @@ from django.utils import timezone
 class GitHubProfile(models.Model):
     username = models.CharField(max_length=255, unique=True)
     total_contributions = models.PositiveIntegerField(default=0)
-    last_synced_at = models.DateTimeField(default=timezone.now)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return self.username
@@ -34,7 +34,12 @@ class ContributionDay(models.Model):
     )
 
     class Meta:
-        unique_together = ("profile", "date")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "date"],
+                name="unique_profile_date"
+            )
+        ]
         ordering = ["date"]
 
     def __str__(self):
