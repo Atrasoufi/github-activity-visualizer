@@ -39,6 +39,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     "rest_framework",
     "contributions.apps.ContributionsConfig",
+    "drf_spectacular",
 ]
 
 MIDDLEWARE = [
@@ -126,4 +127,15 @@ MAILERS = {
     'default': {
         'BACKEND': 'django.core.mail.backends.console.EmailBackend',
     },
+}
+
+REST_FRAMEWORK = {
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+}
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "GitHub Activity Visualizer API",
+    "DESCRIPTION": "Backend API for fetching, caching, and serving GitHub user contribution activity.",
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
 }
