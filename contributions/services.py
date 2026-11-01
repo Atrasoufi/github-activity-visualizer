@@ -7,6 +7,13 @@ from .models import GitHubProfile, ContributionDay
 from datetime import date, timedelta
 from typing import Dict, Any
 
+from .exceptions import (
+    GitHubAPIException,
+    GitHubRateLimitException,
+    GitHubUserNotFoundException,
+    GitHubAuthException,
+)
+
 GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
 
 GRAPHQL_QUERY = """
@@ -33,35 +40,37 @@ class GitHubService:
     def __init__(self, token: str = None):
         self.token = token or os.getenv("GITHUB_TOKEN") or getattr(settings, "GITHUB_TOKEN", None)
 
-    def fetch_user_contributions(self, username: str) -> dict:
-        if not self.token:
-            raise ValueError("GitHub Token is not set. Please set GITHUB_TOKEN.")
+    def fetch_user_contributions(self, username: str):
+        headers = {"Authorization": f"Bearer {self.token}"}
+        try:
+            response = requests.post(
+                "https://api.github.com/graphql",
+                json={"query": self.QUERY, "variables": {"username": username}},
+                headers=headers,
+                timeout=10
+            )
+        except requests.RequestException:
+            raise GitHubAPIException("Connection to GitHub timed out or failed.")
 
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "User-Agent": "GitHub-Activity-Visualizer"
-        }
-
-        response = requests.post(
-            GITHUB_GRAPHQL_URL,
-            json={"query": GRAPHQL_QUERY, "variables": {"username": username}},
-            headers=headers,
-            timeout=30
-        )
-
+        if response.status_code == 401:
+            raise GitHubAuthException()
+        if response.status_code == 403:
+            raise GitHubRateLimitException()
         if response.status_code != 200:
-            raise Exception(f"GitHub API error: status {response.status_code}")
+            raise GitHubAPIException(f"GitHub returned unexpected status {response.status_code}")
 
-        data = response.json()
+        payload = response.json()
+        if "errors" in payload:
+            error_msg = payload["errors"][0].get("message", "")
+            if "Could not resolve to a User" in error_msg:
+                raise GitHubUserNotFoundException()
+            raise GitHubAPIException("Error in GraphQL query evaluation.")
 
-        if "errors" in data:
-            raise Exception(f"GraphQL Errors: {data['errors']}")
-
-        user_data = data.get("data", {}).get("user")
+        user_data = payload.get("data", {}).get("user")
         if not user_data:
-            return None
+            raise GitHubUserNotFoundException()
 
-        return user_data["contributionsCollection"]["contributionCalendar"]
+        return user_data
 
     def sync_profile(self, username: str) -> GitHubProfile:
         """
@@ -97,59 +106,40 @@ class GitHubService:
     
 class AnalyticsService:
     @staticmethod
-    def calculate_stats(profile: GitHubProfile) -> Dict[str, Any]:
-        days = list(profile.contribution_days.order_by("date"))
-
+    def calculate_streaks(contribution_days):
+        days = list(contribution_days.order_by('date'))
         if not days:
-            return {
-                "total_contributions": 0,
-                "current_streak": 0,
-                "longest_streak": 0,
-                "most_active_day": None,
-            }
+            return {"current_streak": 0, "longest_streak": 0}
 
         longest_streak = 0
-        current_streak = 0
         temp_streak = 0
         prev_date = None
-        most_active_day = None
-        max_count = -1
 
         for day in days:
-            # پیدا کردن پرکارترین روز
-            if day.contribution_count > max_count:
-                max_count = day.contribution_count
-                most_active_day = {
-                    "date": str(day.date),
-                    "count": day.contribution_count,
-                    "level": day.contribution_level,
-                }
-
-            # محاسبه استریک‌ها (روزهای متوالی با مشارکت > 0)
-            if day.contribution_count > 0:
-                if prev_date and (day.date - prev_date).days == 1:
+            if day.count > 0:
+                if prev_date is None or day.date == prev_date + timedelta(days=1):
                     temp_streak += 1
                 else:
                     temp_streak = 1
-                longest_streak = max(longest_streak, temp_streak)
                 prev_date = day.date
+                longest_streak = max(longest_streak, temp_streak)
             else:
-                prev_date = None
                 temp_streak = 0
+                prev_date = day.date
 
-        # محاسبه زنجیره فعلی تا امروز یا دیروز
         today = date.today()
         yesterday = today - timedelta(days=1)
-        active_dates = {d.date for d in days if d.contribution_count > 0}
+        active_days = {d.date: d.count for d in days if d.count > 0}
 
-        curr_date = today if today in active_dates else (yesterday if yesterday in active_dates else None)
-        while curr_date and curr_date in active_dates:
-            current_streak += 1
-            curr_date -= timedelta(days=1)
+        current_streak = 0
+        check_date = today if today in active_days else (yesterday if yesterday in active_days else None)
+
+        if check_date:
+            while check_date in active_days:
+                current_streak += 1
+                check_date -= timedelta(days=1)
 
         return {
-            "total_contributions": profile.total_contributions,
             "current_streak": current_streak,
-            "longest_streak": longest_streak,
-            "most_active_day": most_active_day,
+            "longest_streak": longest_streak
         }

@@ -7,21 +7,25 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from .exceptions import GitHubRateLimitException
 from .models import ContributionDay, GitHubProfile
-from .serializers import ContributionSerializer, GitHubProfileSerializer
+from .serializers import GitHubProfileSerializer
 
 
 class ModelTests(TestCase):
-    """تست‌های مدل‌ها و اعتبارسنجی محدودیت‌های دیتابیس"""
+    """تست‌های مدل‌ها و محدودیت‌های دیتابیس"""
 
     def setUp(self):
-        self.profile = GitHubProfile.objects.create(username="test_dev", total_contributions=10)
+        self.profile = GitHubProfile.objects.create(
+            username="test_dev",
+            total_contributions=10
+        )
 
     def test_profile_str(self):
         self.assertEqual(str(self.profile), "test_dev")
 
     def test_unique_profile_date_constraint(self):
-        """بررسی جلوگیری از ثبت رکورد تکراری برای یک پروفایل در یک روز"""
+        """تست عدم امکان ثبت دو رکورد مشارکت در یک تاریخ برای یک کاربر"""
         ContributionDay.objects.create(
             profile=self.profile,
             date=date(2026, 11, 1),
@@ -39,7 +43,7 @@ class ModelTests(TestCase):
 
 
 class SerializerTests(TestCase):
-    """تست خروجی و ساختار سریالایزرها"""
+    """تست‌های ساختار خروجی Serializer"""
 
     def test_github_profile_serializer_empty_contributions(self):
         profile = GitHubProfile.objects.create(username="empty_user")
@@ -49,10 +53,13 @@ class SerializerTests(TestCase):
 
 
 class ProfileAPITests(APITestCase):
-    """تست اندپوینت‌های GET برای پروفایل و مشارکت‌ها"""
+    """تست اندپوینت‌های خواندنی پروفایل و لیست مشارکت‌ها"""
 
     def setUp(self):
-        self.profile = GitHubProfile.objects.create(username="atra", total_contributions=5)
+        self.profile = GitHubProfile.objects.create(
+            username="atra",
+            total_contributions=5
+        )
         self.day = ContributionDay.objects.create(
             profile=self.profile,
             date=date(2026, 11, 1),
@@ -85,11 +92,10 @@ class ProfileAPITests(APITestCase):
 
 
 class SyncAPITests(APITestCase):
-    """تست اندپوینت POST /sync/ با شبیه‌سازی (Mock) پاسخ گیت‌هاب"""
+    """تست اندپوینت POST /sync/ و ذخیره در دیتابیس با Mock"""
 
     @patch("contributions.services.GitHubService.fetch_user_contributions")
     def test_sync_profile_success(self, mock_fetch):
-        # داده ساختگی شبیه‌سازی‌شده از گیت‌هاب
         mock_fetch.return_value = {
             "totalContributions": 15,
             "weeks": [
@@ -112,7 +118,6 @@ class SyncAPITests(APITestCase):
         self.assertEqual(response.data["username"], "mocked_user")
         self.assertEqual(response.data["total_contributions"], 15)
 
-        # اعتبارسنجی در دیتابیس تست
         profile = GitHubProfile.objects.get(username="mocked_user")
         self.assertEqual(profile.total_contributions, 15)
         self.assertIsNotNone(profile.last_synced_at)
@@ -120,10 +125,36 @@ class SyncAPITests(APITestCase):
 
     @patch("contributions.services.GitHubService.fetch_user_contributions")
     def test_sync_profile_user_not_found(self, mock_fetch):
-        # شبیه‌سازی حالتی که کاربر در گیت‌هاب وجود ندارد
         mock_fetch.return_value = None
 
         url = reverse("contributions:profile-sync", kwargs={"username": "ghost_user"})
         response = self.client.post(url)
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class NegativeAndEdgeCaseAPITests(APITestCase):
+    """تست اعتبارسنجی ورودی‌ها و ارورهای API خارجی"""
+
+    def setUp(self):
+        self.profile = GitHubProfile.objects.create(username="testuser")
+
+    def test_invalid_date_format_in_contributions_filter(self):
+        url = reverse("contributions:profile-contributions-list", kwargs={"username": "testuser"})
+        response = self.client.get(f"{url}?from_date=2026-99-99")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("from_date", response.data)
+
+    def test_date_range_inverted(self):
+        url = reverse("contributions:profile-contributions-list", kwargs={"username": "testuser"})
+        response = self.client.get(f"{url}?from_date=2026-10-10&to_date=2026-10-01")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @patch("contributions.services.GitHubService.fetch_user_contributions")
+    def test_sync_github_rate_limit(self, mock_fetch):
+        mock_fetch.side_effect = GitHubRateLimitException()
+
+        url = reverse("contributions:profile-sync", kwargs={"username": "testuser"})
+        response = self.client.post(url)
+        self.assertEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertEqual(response.data["error"]["code"], "GitHubRateLimitException")

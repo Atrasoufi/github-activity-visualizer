@@ -1,74 +1,80 @@
-from rest_framework import status
-from rest_framework.generics import ListAPIView, RetrieveAPIView, get_object_or_404
+import logging
+from django.shortcuts import get_object_or_404
+from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from drf_spectacular.utils import extend_schema
 
+from .exceptions import GitHubAPIException
 from .models import ContributionDay, GitHubProfile
-from .serializers import ContributionSerializer, GitHubProfileSerializer
+from .serializers import (
+    ContributionSerializer,
+    DateRangeFilterSerializer,
+    GitHubProfileSerializer,
+)
 from .services import AnalyticsService, GitHubService
 
+logger = logging.getLogger(__name__)
 
-class GitHubProfileDetailView(RetrieveAPIView):
-    """
-    دریافت مشخصات کلی کاربر به همراه تمام روزهای مشارکت
-    """
+
+class GitHubProfileDetailView(generics.RetrieveAPIView):
+    """دریافت اطلاعات کلی پروفایل گیت‌هاب"""
     queryset = GitHubProfile.objects.all()
     serializer_class = GitHubProfileSerializer
     lookup_field = "username"
-    lookup_url_kwarg = "username"
 
 
-class ContributionDayListView(ListAPIView):
-    """
-    لیست روزهای مشارکت با امکان فیلتر بازه زمانی:
-    ?from_date=2026-01-01&to_date=2026-12-31
-    """
+class ContributionDayListView(generics.ListAPIView):
+    """دریافت روزهای مشارکت یک پروفایل با فیلتر بازه تاریخی"""
     serializer_class = ContributionSerializer
 
     def get_queryset(self):
-        username = self.kwargs.get("username")
+        username = self.kwargs["username"]
         profile = get_object_or_404(GitHubProfile, username=username)
-        queryset = profile.contribution_days.all()
 
-        from_date = self.request.query_params.get("from_date")
-        to_date = self.request.query_params.get("to_date")
+        filter_serializer = DateRangeFilterSerializer(data=self.request.query_params)
+        filter_serializer.is_valid(raise_exception=True)
+        validated_data = filter_serializer.validated_data
 
-        if from_date:
-            queryset = queryset.filter(date__gte=from_date)
-        if to_date:
-            queryset = queryset.filter(date__lte=to_date)
+        queryset = ContributionDay.objects.filter(profile=profile)
 
-        return queryset
+        if "from_date" in validated_data:
+            queryset = queryset.filter(date__gte=validated_data["from_date"])
+        if "to_date" in validated_data:
+            queryset = queryset.filter(date__lte=validated_data["to_date"])
+
+        return queryset.order_by("date")
 
 
 class GitHubProfileStatsView(APIView):
-    """
-    محاسبه آمار تحلیلی کاربر: استریک فعلی، طولانی‌ترین استریک و پرکارترین روز
-    """
+    """دریافت آمار تحلیلی استریک‌ها و فعال‌ترین روزها"""
     def get(self, request, username):
         profile = get_object_or_404(GitHubProfile, username=username)
-        stats = AnalyticsService.calculate_stats(profile)
+        contribution_days = ContributionDay.objects.filter(profile=profile)
+        stats = AnalyticsService.calculate_streaks(contribution_days)
         return Response(stats, status=status.HTTP_200_OK)
 
 
 class GitHubProfileSyncView(APIView):
-    """
-    دریافت و ذخیره اطلاعات زنده از گیت‌هاب
-    """
-    serializer_class = GitHubProfileSerializer
-
-    @extend_schema(responses={200: GitHubProfileSerializer})
+    """سینک و ذخیره‌سازی اطلاعات کاربر از گیت‌هاب"""
     def post(self, request, username):
         service = GitHubService()
         try:
             profile = service.sync_profile(username)
-            if profile is None:
+            if not profile:
                 return Response(
-                    {"detail": f"GitHub user '{username}' not found."},
-                    status=status.HTTP_404_NOT_FOUND
+                    {"error": {"code": "NotFound", "message": "GitHub user was not found."}},
+                    status=status.HTTP_404_NOT_FOUND,
                 )
             serializer = GitHubProfileSerializer(profile)
             return Response(serializer.data, status=status.HTTP_200_OK)
-        except Exception as e:
-            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except GitHubAPIException as e:
+            return Response(
+                {"error": {"code": e.__class__.__name__, "message": str(e)}},
+                status=e.status_code,
+            )
+        except Exception:
+            logger.exception("Unexpected error during profile sync for %s", username)
+            return Response(
+                {"error": {"code": "InternalError", "message": "An unexpected error occurred."}},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )

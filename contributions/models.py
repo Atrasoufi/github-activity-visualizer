@@ -44,3 +44,4 @@ class ContributionDay(models.Model):
 
     def __str__(self):
         return f"{self.profile.username} - {self.date}"
+    
