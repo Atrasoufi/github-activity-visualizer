@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: activity_visualizer_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: activity_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  web:
+    build: .
+    container_name: activity_visualizer_web
+    restart: unless-stopped
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py runserver 0.0.0.0:8000"
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    environment:
+      - DJANGO_DEBUG=1
+      - DJANGO_SECRET_KEY=django-insecure-docker-secret-key-12345
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - DB_ENGINE=django.db.backends.postgresql
+      - DB_NAME=activity_db
+      - DB_USER=postgres
+      - DB_PASSWORD=postgrespassword
+      - DB_HOST=db
+      - DB_PORT=5432
+    depends_on:
+      - db
+
+volumes:
+  postgres_data:
